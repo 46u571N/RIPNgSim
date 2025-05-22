@@ -3,99 +3,122 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Simulador RIPng</title>
+    <title>Simulador RIPng Mejorado</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <h1>Simulador RIPng</h1>
+    <h1>Simulador RIPng Mejorado 📡</h1>
 
-    <div class="controls-container">
-        <h2>Controles Globales</h2>
-        <div class="control-group">
-            <label for="updateTimer">Update Timer (s):</label>
-            <input type="number" id="updateTimer" value="30" min="1">
-        </div>
-        <div class="control-group">
-            <label for="invalidTimer">Invalid Timer (s):</label>
-            <input type="number" id="invalidTimer" value="180" min="1">
-        </div>
-        <div class="control-group">
-            <label for="flushTimer">Flush Timer (s después de inválido):</label>
-            <input type="number" id="flushTimer" value="120" min="1">
-        </div>
-        <div class="control-group">
-            <input type="checkbox" id="splitHorizon" checked>
-            <label for="splitHorizon">Split Horizon</label>
-        </div>
-        <div class="control-group">
-            <input type="checkbox" id="poisonReverse">
-            <label for="poisonReverse">Poison Reverse (con Split Horizon)</label>
-        </div>
-        <div class="control-group">
-            <input type="checkbox" id="triggeredUpdates" checked>
-            <label for="triggeredUpdates">Triggered Updates</label>
-        </div>
-        <div class="simulation-buttons">
-            <button id="startButton">Iniciar</button>
-            <button id="pauseButton" disabled>Pausar</button>
-            <button id="stepButton">Paso (1s)</button>
-            <button id="resetButton">Reiniciar</button>
-        </div>
-        <p>Tiempo Simulación: <span id="simulationTimeDisplay">0</span>s</p>
+    <div class="topology-image-container">
+        <img src="image_140557.png" alt="Topología de Red" id="topologyImage">
     </div>
 
-    <div class="network-container">
-        <div class="router-display" id="R1-display">
-            <h3>R1</h3>
-            <div class="interfaces">
-                <p>eth0: 2000:1::1/64 (a S1)</p>
-            </div>
-            <h4>Tabla de Enrutamiento R1:</h4>
-            <table id="R1-table">
-                <thead><tr><th>Prefijo</th><th>Próx. Salto</th><th>Métrica</th><th>Interfaz</th><th>Timeout</th></tr></thead>
-                <tbody></tbody>
-            </table>
-        </div>
-        <div class="router-display" id="R2-display">
-            <h3>R2</h3>
-            <div class="interfaces">
-                <p>eth1: 2000:1::2/64 (a S1)</p>
-                <p>eth0: 2000:2::2/64 (a S2)</p>
-            </div>
-            <h4>Tabla de Enrutamiento R2:</h4>
-            <table id="R2-table">
-                <thead><tr><th>Prefijo</th><th>Próx. Salto</th><th>Métrica</th><th>Interfaz</th><th>Timeout</th></tr></thead>
-                <tbody></tbody>
-            </table>
-        </div>
-        <div class="router-display" id="R3-display">
-            <h3>R3</h3>
-            <div class="interfaces">
-                <p>eth1: 2000:3::1/64 (a S3)</p>
-            </div>
-            <h4>Tabla de Enrutamiento R3:</h4>
-            <table id="R3-table">
-                <thead><tr><th>Prefijo</th><th>Próx. Salto</th><th>Métrica</th><th>Interfaz</th><th>Timeout</th></tr></thead>
-                <tbody></tbody>
-            </table>
-        </div>
-        <div class="router-display" id="R4-display">
-            <h3>R4</h3>
-            <div class="interfaces">
-                <p>eth0: 2000:3::2/64 (a S3)</p>
-                <p>eth1: 2000:2::1/64 (a S2)</p>
-            </div>
-            <h4>Tabla de Enrutamiento R4:</h4>
-            <table id="R4-table">
-                <thead><tr><th>Prefijo</th><th>Próx. Salto</th><th>Métrica</th><th>Interfaz</th><th>Timeout</th></tr></thead>
-                <tbody></tbody>
-            </table>
-        </div>
-    </div>
+    <div class="main-container">
+        <div class="left-panel">
+            <div class="controls-container">
+                <h2>Controles Globales</h2>
+                <div class="control-group">
+                    <label for="updateTimer">Update Timer (s):</label>
+                    <input type="number" id="updateTimer" value="30" min="1">
+                </div>
+                <div class="control-group">
+                    <label for="invalidTimer">Invalid Timer (s):</label>
+                    <input type="number" id="invalidTimer" value="180" min="1">
+                </div>
+                <div class="control-group">
+                    <label for="flushTimer">Flush Timer (s después de inválido):</label>
+                    <input type="number" id="flushTimer" value="120" min="1">
+                </div>
+                <div class="control-group">
+                    <input type="checkbox" id="splitHorizon" checked>
+                    <label for="splitHorizon">Split Horizon</label>
+                </div>
+                <div class="control-group">
+                    <input type="checkbox" id="poisonReverse">
+                    <label for="poisonReverse">Poison Reverse (con Split Horizon)</label>
+                </div>
+                <div class="control-group">
+                    <input type="checkbox" id="triggeredUpdates" checked>
+                    <label for="triggeredUpdates">Triggered Updates</label>
+                </div>
 
-    <div class="log-container">
-        <h2>Registro de Eventos</h2>
-        <div id="eventLog"></div>
+                <h2>Estado de Enlaces</h2>
+                <div class="link-control">
+                    <span>Enlace R1-R2 (vía S1):</span>
+                    <button class="link-toggle-button" data-linkid="L1">Activo</button>
+                </div>
+                <div class="link-control">
+                    <span>Enlace R2-R4 (vía S2):</span>
+                    <button class="link-toggle-button" data-linkid="L2">Activo</button>
+                </div>
+                <div class="link-control">
+                    <span>Enlace R3-R4 (vía S3):</span>
+                    <button class="link-toggle-button" data-linkid="L3">Activo</button>
+                </div>
+
+                <div class="simulation-buttons">
+                    <button id="startButton">Iniciar</button>
+                    <button id="pauseButton" disabled>Pausar</button>
+                    <button id="stepButton">Paso (1s)</button>
+                    <button id="resetButton">Reiniciar</button>
+                </div>
+                <p>Tiempo Simulación: <span id="simulationTimeDisplay">0</span>s</p>
+            </div>
+
+            <div class="log-container">
+                <h2>Registro de Eventos</h2>
+                <div id="eventLog"></div>
+            </div>
+        </div>
+
+        <div class="right-panel network-container">
+            <div class="router-display" id="R1-display">
+                <h3>R1 <span class="update-indicator" id="R1-update-indicator"></span></h3>
+                <div class="interfaces">
+                    <p data-interface="R1-eth0">eth0: 2000:1::1/64 (a S1)</p>
+                </div>
+                <h4>Tabla de Enrutamiento R1:</h4>
+                <table id="R1-table">
+                    <thead><tr><th>Prefijo</th><th>Próx. Salto</th><th>Métrica</th><th>Interfaz</th><th>Timeout</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="router-display" id="R2-display">
+                <h3>R2 <span class="update-indicator" id="R2-update-indicator"></span></h3>
+                <div class="interfaces">
+                    <p data-interface="R2-eth1">eth1: 2000:1::2/64 (a S1)</p>
+                    <p data-interface="R2-eth0">eth0: 2000:2::2/64 (a S2)</p>
+                </div>
+                <h4>Tabla de Enrutamiento R2:</h4>
+                <table id="R2-table">
+                    <thead><tr><th>Prefijo</th><th>Próx. Salto</th><th>Métrica</th><th>Interfaz</th><th>Timeout</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="router-display" id="R3-display">
+                <h3>R3 <span class="update-indicator" id="R3-update-indicator"></span></h3>
+                <div class="interfaces">
+                    <p data-interface="R3-eth1">eth1: 2000:3::1/64 (a S3)</p>
+                </div>
+                <h4>Tabla de Enrutamiento R3:</h4>
+                <table id="R3-table">
+                    <thead><tr><th>Prefijo</th><th>Próx. Salto</th><th>Métrica</th><th>Interfaz</th><th>Timeout</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="router-display" id="R4-display">
+                <h3>R4 <span class="update-indicator" id="R4-update-indicator"></span></h3>
+                <div class="interfaces">
+                    <p data-interface="R4-eth0">eth0: 2000:3::2/64 (a S3)</p>
+                    <p data-interface="R4-eth1">eth1: 2000:2::1/64 (a S2)</p>
+                </div>
+                <h4>Tabla de Enrutamiento R4:</h4>
+                <table id="R4-table">
+                    <thead><tr><th>Prefijo</th><th>Próx. Salto</th><th>Métrica</th><th>Interfaz</th><th>Timeout</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <script src="script.js"></script>
