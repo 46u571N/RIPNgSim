@@ -138,89 +138,128 @@ class Router {
         });
     }
 
-    // En la clase Router
-    handleLinkChange(linkId, newStatus) {
-        const affectedInterface = this.getInterfaceByLinkId(linkId);
-        if (!affectedInterface) return;
-    
-        logEvent(`${this.id}: Enlace ${linkId} (interfaz ${affectedInterface.name}) cambió a ${newStatus}.`);
-        let significantChangeOccurred = false; // Para rastrear si algo relevante cambió
-    
-        if (newStatus === "down") {
-            // 1. Eliminar la ruta directamente conectada asociada con esta interfaz
-            const directRouteIndex = this.routingTable.findIndex(
-                r => r.isDirectlyConnected &&
-                     r.interfaceName === affectedInterface.name &&
-                     r.prefix === affectedInterface.networkPrefix
-            );
-    
-            if (directRouteIndex !== -1) {
-                logEvent(`${this.id}: Eliminada ruta directa ${this.routingTable[directRouteIndex].prefix} en ${affectedInterface.name} por enlace caído.`);
-                this.routingTable.splice(directRouteIndex, 1);
-                significantChangeOccurred = true;
-            }
-    
-            // 2. Invalidar rutas aprendidas a través de esta interfaz (del vecino específico de este enlace)
-            const linkDetails = globalLinks[affectedInterface.linkId];
-            let neighborLLAonThisLink = null;
-            if (linkDetails) {
-                const peerInfo = linkDetails.peers.find(p => p.routerId !== this.id);
-                if (peerInfo) {
-                    const neighborRouter = routers.find(r => r.id === peerInfo.routerId);
-                    const neighborInterfaceObj = neighborRouter?.getInterfaceByName(peerInfo.iface);
-                    if (neighborInterfaceObj) {
-                        neighborLLAonThisLink = neighborInterfaceObj.linkLocalAddress;
-                    }
+// En la clase Router
+handleLinkChange(linkId, newStatus) {
+    const affectedInterface = this.getInterfaceByLinkId(linkId);
+    if (!affectedInterface) {
+        console.error(`ERROR: ${this.id}.handleLinkChange - No se encontró la interfaz para linkId: ${linkId}`);
+        return;
+    }
+
+    // --- INICIO DE DEBUGGING ---
+    console.log(`%c[DEBUG] ${this.id}.handleLinkChange | Link: ${linkId} | Interface: ${affectedInterface.name} | New Status: ${newStatus}`, "color: blue; font-weight: bold;");
+    // --- FIN DE DEBUGGING ---
+
+    let significantChangeOccurred = false;
+
+    if (newStatus === "down") {
+        // 1. Eliminar la ruta directamente conectada asociada con esta interfaz
+        const directRouteIndex = this.routingTable.findIndex(
+            r => r.isDirectlyConnected &&
+                 r.interfaceName === affectedInterface.name &&
+                 r.prefix === affectedInterface.networkPrefix
+        );
+
+        // --- INICIO DE DEBUGGING ---
+        console.log(`[DEBUG] ${this.id} | Checking direct route for ${affectedInterface.networkPrefix} on ${affectedInterface.name}. Index: ${directRouteIndex}`);
+        // --- FIN DE DEBUGGING ---
+
+        if (directRouteIndex !== -1) {
+            const removedRouteForLog = this.routingTable[directRouteIndex];
+            logEvent(`${this.id}: Eliminada ruta directa ${removedRouteForLog.prefix} en ${affectedInterface.name} por enlace caído.`);
+            this.routingTable.splice(directRouteIndex, 1);
+            significantChangeOccurred = true;
+            // --- INICIO DE DEBUGGING ---
+            console.log(`[DEBUG] ${this.id} | Direct route REMOVED. significantChangeOccurred = ${significantChangeOccurred}`);
+            // --- FIN DE DEBUGGING ---
+        }
+
+        // 2. Invalidar rutas aprendidas a través de esta interfaz (del vecino específico de este enlace)
+        const linkDetails = globalLinks[affectedInterface.linkId];
+        let neighborLLAonThisLink = null;
+        if (linkDetails) {
+            const peerInfo = linkDetails.peers.find(p => p.routerId !== this.id);
+            if (peerInfo) {
+                const neighborRouter = routers.find(r => r.id === peerInfo.routerId);
+                const neighborInterfaceObj = neighborRouter?.getInterfaceByName(peerInfo.iface);
+                if (neighborInterfaceObj) {
+                    neighborLLAonThisLink = neighborInterfaceObj.linkLocalAddress;
                 }
-            }
-    
-            this.routingTable.forEach(route => {
-                if (!route.isDirectlyConnected &&
-                    route.interfaceName === affectedInterface.name &&
-                    (neighborLLAonThisLink === null || route.nextHop === neighborLLAonThisLink)) { // Si no podemos determinar el LLA del vecino, somos menos estrictos; idealmente, siempre lo encontraríamos.
-                    
-                    if (route.metric < MAX_METRIC) { // Solo invalidar si era una ruta válida
-                        route.metric = MAX_METRIC;
-                        route.markedForDeletion = true;
-                        route.invalidTimerCountdown = 0;
-                        route.flushTimerCountdown = globalSettings.flushTimer;
-                        significantChangeOccurred = true;
-                        logEvent(`${this.id}: Ruta ${route.prefix} vía ${route.nextHop} (int ${affectedInterface.name}) invalidada por enlace caído.`);
-                    }
-                }
-            });
-    
-            if (significantChangeOccurred) {
-                this.pendingTriggeredUpdate = true;
-            }
-    
-        } else { // Link is up (newStatus === "up")
-            // 1. Re-añadir la ruta directamente conectada para esta interfaz si no existe
-            const existingDirectRoute = this.routingTable.find(
-                r => r.isDirectlyConnected &&
-                     r.interfaceName === affectedInterface.name &&
-                     r.prefix === affectedInterface.networkPrefix
-            );
-    
-            if (!existingDirectRoute) {
-                const entry = new RouteEntry(affectedInterface.networkPrefix, "::", 1, affectedInterface.name, true, this.id);
-                this.routingTable.push(entry);
-                significantChangeOccurred = true;
-                logEvent(`${this.id}: Añadida ruta directa ${entry.prefix} en ${affectedInterface.name} por enlace activo.`);
-            }
-            
-            // Cuando un enlace se activa, el router debe anunciar su presencia/rutas.
-            // Establecer pendingTriggeredUpdate asegura que envíe una actualización pronto.
-            // Incluso si la ruta directa ya existía (estado anómalo), activar un enlace es motivo para actualizar.
-            if (significantChangeOccurred || !existingDirectRoute) { // Si hubo cambio o si la ruta no existía y se añadió
-                this.pendingTriggeredUpdate = true;
-            } else {
-                 // Si la ruta directa ya existía y no hubo otros cambios, aún así es bueno forzar un trigger
-                 // al levantar una interfaz para asegurar que los vecinos se enteren.
-                this.pendingTriggeredUpdate = true;
             }
         }
+        // --- INICIO DE DEBUGGING ---
+        console.log(`[DEBUG] ${this.id} | For learned routes on ${affectedInterface.name}, expected neighbor LLA: ${neighborLLAonThisLink}`);
+        // --- FIN DE DEBUGGING ---
+
+        // Es importante iterar sobre una copia si se va a modificar la longitud del array original dentro del bucle (ej. con splice).
+        // Aquí solo modificamos propiedades de los objetos, por lo que no es estrictamente necesario, pero es buena práctica tenerlo en cuenta.
+        // const routesToProcess = [...this.routingTable]; // Si fueses a eliminar elementos del array que iteras
+        this.routingTable.forEach(route => {
+            if (!route.isDirectlyConnected &&
+                route.interfaceName === affectedInterface.name &&
+                (neighborLLAonThisLink === null || route.nextHop === neighborLLAonThisLink)) {
+                
+                // --- INICIO DE DEBUGGING ---
+                console.log(`[DEBUG] ${this.id} | Checking learned route to invalidate: ${route.prefix} via ${route.nextHop} on ${route.interfaceName}. Current metric: ${route.metric}`);
+                // --- FIN DE DEBUGGING ---
+                
+                if (route.metric < MAX_METRIC) { // Solo invalidar si era una ruta válida
+                    route.metric = MAX_METRIC;
+                    route.markedForDeletion = true;
+                    route.invalidTimerCountdown = 0;
+                    route.flushTimerCountdown = globalSettings.flushTimer;
+                    significantChangeOccurred = true;
+                    logEvent(`${this.id}: Ruta ${route.prefix} vía ${route.nextHop} (int ${affectedInterface.name}) invalidada por enlace caído.`);
+                    // --- INICIO DE DEBUGGING ---
+                    console.log(`[DEBUG] ${this.id} | Learned route INVALIDATED: ${route.prefix}. significantChangeOccurred = ${significantChangeOccurred}`);
+                    // --- FIN DE DEBUGGING ---
+                }
+            }
+        });
+
+        // --- INICIO DE DEBUGGING ---
+        console.log(`[DEBUG] ${this.id} | After all checks for 'down' status, final significantChangeOccurred = ${significantChangeOccurred}`);
+        // --- FIN DE DEBUGGING ---
+
+        if (significantChangeOccurred) {
+            this.pendingTriggeredUpdate = true;
+            // --- INICIO DE DEBUGGING ---
+            console.log(`%c[DEBUG] ${this.id} | pendingTriggeredUpdate SET TO TRUE due to significant change.`, "color: green;");
+            // --- FIN DE DEBUGGING ---
+        } else {
+            // --- INICIO DE DEBUGGING ---
+            console.log(`%c[DEBUG] ${this.id} | NO significant change detected, pendingTriggeredUpdate NOT SET.`, "color: orange;");
+            // --- FIN DE DEBUGGING ---
+        }
+
+    } else { // Link is up (newStatus === "up")
+        const existingDirectRoute = this.routingTable.find(
+            r => r.isDirectlyConnected &&
+                 r.interfaceName === affectedInterface.name &&
+                 r.prefix === affectedInterface.networkPrefix
+        );
+
+        if (!existingDirectRoute) {
+            const entry = new RouteEntry(affectedInterface.networkPrefix, "::", 1, affectedInterface.name, true, this.id);
+            this.routingTable.push(entry);
+            significantChangeOccurred = true; // Un cambio ocurrió
+            logEvent(`${this.id}: Añadida ruta directa ${entry.prefix} en ${affectedInterface.name} por enlace activo.`);
+            // --- INICIO DE DEBUGGING ---
+            console.log(`[DEBUG] ${this.id} | Direct route ADDED for link up. significantChangeOccurred = ${significantChangeOccurred}`);
+            // --- FIN DE DEBUGGING ---
+        }
+        
+        // Aunque no haya habido un "significantChangeOccurred" (la ruta directa ya existía),
+        // levantar una interfaz es motivo suficiente para querer enviar una actualización.
+        this.pendingTriggeredUpdate = true;
+        // --- INICIO DE DEBUGGING ---
+        console.log(`%c[DEBUG] ${this.id} | Link is UP. pendingTriggeredUpdate SET TO TRUE (either by change or policy).`, "color: green;");
+        // --- FIN DE DEBUGGING ---
     }
+    // --- INICIO DE DEBUGGING ---
+    console.log(`[DEBUG] ${this.id}.handleLinkChange END | Current this.pendingTriggeredUpdate = ${this.pendingTriggeredUpdate}`);
+    // --- FIN DE DEBUGGING ---
+}
 
     tickSecond() {
         let events = [];
@@ -236,15 +275,24 @@ class Router {
                 }
             }
         }
-
-        this.updateTimerCountdown--;
-        if (this.updateTimerCountdown <= 0 || (this.pendingTriggeredUpdate && globalSettings.triggeredUpdates)) {
-            this.updateTimerCountdown = globalSettings.updateTimer;
-            events.push({ type: 'send_update', routerId: this.id, isTriggered: this.pendingTriggeredUpdate });
-            this.pendingTriggeredUpdate = false;
-        }
-        return events;
+ // --- INICIO DE DEBUGGING ---
+    if (this.pendingTriggeredUpdate) { // Solo loguea si hay una posibilidad de trigger
+        console.log(`%c[DEBUG] ${this.id}.tickSecond | UpdateCountdown: ${this.updateTimerCountdown} | pendingTriggeredUpdate: ${this.pendingTriggeredUpdate} | globalSettings.triggeredUpdates: ${globalSettings.triggeredUpdates}`, "color: purple");
     }
+    // --- FIN DE DEBUGGING ---
+
+    this.updateTimerCountdown--;
+    if (this.updateTimerCountdown <= 0 || (this.pendingTriggeredUpdate && globalSettings.triggeredUpdates)) {
+        // --- INICIO DE DEBUGGING ---
+        const wasTriggeredByFlag = (this.pendingTriggeredUpdate && globalSettings.triggeredUpdates);
+        console.log(`%c[DEBUG] ${this.id}.tickSecond | SCHEDULING UPDATE. Reason: ${this.updateTimerCountdown <= 0 ? 'Timer Expired' : 'Pending Trigger'}. IsTriggered: ${wasTriggeredByFlag}`, "background-color: yellow; color: black");
+        // --- FIN DE DEBUGGING ---
+        
+        events.push({ type: 'send_update', routerId: this.id, isTriggered: wasTriggeredByFlag });
+        this.updateTimerCountdown = globalSettings.updateTimer;
+        this.pendingTriggeredUpdate = false; // Se resetea aquí
+    }
+    return events;
 
     prepareUpdatePacketForInterface(sendingInterfaceName) {
         const updatePacket = [];
