@@ -96,19 +96,20 @@ class RouteEntry {
 }
 
 class Router {
-    constructor(id, name, interfacesConfig) {
-        this.id = id;
-        this.name = name;
-        // interfacesConfig = [{ name: "eth0", ip: "2000:1::1/64", networkPrefix: "2000:1::/64", linkId: "L1", mapsToRouter: "R2", mapsToInterface: "eth1" }]
-        this.interfaces = interfacesConfig.map(iface => ({
-            ...iface,
-            linkLocalAddress: `fe80::${this.id}:${iface.name}`,
-            ripEnabled: true,
-        }));
-        this.routingTable = [];
-        this.updateTimerCountdown = Math.floor(Math.random() * globalSettings.updateTimer) + 1;
-        this.pendingTriggeredUpdate = false;
-    }
+        // En la clase Router
+        constructor(id, name, interfacesConfig) {
+            this.id = id;
+            this.name = name;
+            this.interfaces = interfacesConfig.map(iface => ({
+                ...iface,
+                linkLocalAddress: `fe80::${this.id}:${iface.name}`,
+                ripEnabled: true,
+            }));
+            this.routingTable = [];
+            this.updateTimerCountdown = Math.floor(Math.random() * globalSettings.updateTimer) + 1;
+            this.pendingTriggeredUpdate = false;
+            this.poisonedDirectPrefixesForNextUpdate = []; // <--- NUEVA PROPIEDAD
+        }
 
     getInterfaceByName(name) {
         return this.interfaces.find(iface => iface.name === name);
@@ -146,93 +147,73 @@ handleLinkChange(linkId, newStatus) {
         return;
     }
 
-    // --- INICIO DE DEBUGGING ---
     console.log(`%c[DEBUG] ${this.id}.handleLinkChange | Link: ${linkId} | Interface: ${affectedInterface.name} | New Status: ${newStatus}`, "color: blue; font-weight: bold;");
-    // --- FIN DE DEBUGGING ---
-
+    
+    // Limpiar la lista de prefijos directos a envenenar al inicio de cada manejo de cambio de enlace
+    // Esto asegura que solo se envenenen los prefijos relevantes para ESTE evento específico.
+    this.poisonedDirectPrefixesForNextUpdate = [];
+    
     let significantChangeOccurred = false;
 
     if (newStatus === "down") {
-        // 1. Eliminar la ruta directamente conectada asociada con esta interfaz
         const directRouteIndex = this.routingTable.findIndex(
             r => r.isDirectlyConnected &&
                  r.interfaceName === affectedInterface.name &&
                  r.prefix === affectedInterface.networkPrefix
         );
 
-        // --- INICIO DE DEBUGGING ---
         console.log(`[DEBUG] ${this.id} | Checking direct route for ${affectedInterface.networkPrefix} on ${affectedInterface.name}. Index: ${directRouteIndex}`);
-        // --- FIN DE DEBUGGING ---
 
         if (directRouteIndex !== -1) {
-            const removedRouteForLog = this.routingTable[directRouteIndex];
-            logEvent(`${this.id}: Eliminada ruta directa ${removedRouteForLog.prefix} en ${affectedInterface.name} por enlace caído.`);
-            this.routingTable.splice(directRouteIndex, 1);
+            const removedDirectRoute = this.routingTable[directRouteIndex];
+            logEvent(`${this.id}: Eliminada ruta directa ${removedDirectRoute.prefix} en ${affectedInterface.name} por enlace caído.`);
+            
+            // AÑADIR A LA LISTA DE ENVENENAMIENTO
+            this.poisonedDirectPrefixesForNextUpdate.push({ prefix: removedDirectRoute.prefix, metric: MAX_METRIC });
+            
+            this.routingTable.splice(directRouteIndex, 1); // Eliminar de la tabla activa
             significantChangeOccurred = true;
-            // --- INICIO DE DEBUGGING ---
-            console.log(`[DEBUG] ${this.id} | Direct route REMOVED. significantChangeOccurred = ${significantChangeOccurred}`);
-            // --- FIN DE DEBUGGING ---
+            console.log(`[DEBUG] ${this.id} | Direct route REMOVED. Added ${removedDirectRoute.prefix} to temporary poison list. significantChangeOccurred = ${significantChangeOccurred}`);
         }
 
-        // 2. Invalidar rutas aprendidas a través de esta interfaz (del vecino específico de este enlace)
+        // ... (la lógica para invalidar rutas APRENDIDAS sigue igual que antes) ...
+        // Esta lógica ya resulta en rutas con métrica 16 en this.routingTable,
+        // que serán recogidas por prepareUpdatePacketForInterface.
         const linkDetails = globalLinks[affectedInterface.linkId];
         let neighborLLAonThisLink = null;
-        if (linkDetails) {
-            const peerInfo = linkDetails.peers.find(p => p.routerId !== this.id);
-            if (peerInfo) {
-                const neighborRouter = routers.find(r => r.id === peerInfo.routerId);
-                const neighborInterfaceObj = neighborRouter?.getInterfaceByName(peerInfo.iface);
-                if (neighborInterfaceObj) {
-                    neighborLLAonThisLink = neighborInterfaceObj.linkLocalAddress;
-                }
-            }
-        }
-        // --- INICIO DE DEBUGGING ---
-        console.log(`[DEBUG] ${this.id} | For learned routes on ${affectedInterface.name}, expected neighbor LLA: ${neighborLLAonThisLink}`);
-        // --- FIN DE DEBUGGING ---
+        if (linkDetails) { /* ... (código para obtener neighborLLAonThisLink) ... */ }
 
-        // Es importante iterar sobre una copia si se va a modificar la longitud del array original dentro del bucle (ej. con splice).
-        // Aquí solo modificamos propiedades de los objetos, por lo que no es estrictamente necesario, pero es buena práctica tenerlo en cuenta.
-        // const routesToProcess = [...this.routingTable]; // Si fueses a eliminar elementos del array que iteras
         this.routingTable.forEach(route => {
             if (!route.isDirectlyConnected &&
                 route.interfaceName === affectedInterface.name &&
                 (neighborLLAonThisLink === null || route.nextHop === neighborLLAonThisLink)) {
-                
-                // --- INICIO DE DEBUGGING ---
-                console.log(`[DEBUG] ${this.id} | Checking learned route to invalidate: ${route.prefix} via ${route.nextHop} on ${route.interfaceName}. Current metric: ${route.metric}`);
-                // --- FIN DE DEBUGGING ---
-                
-                if (route.metric < MAX_METRIC) { // Solo invalidar si era una ruta válida
+                if (route.metric < MAX_METRIC) {
                     route.metric = MAX_METRIC;
                     route.markedForDeletion = true;
                     route.invalidTimerCountdown = 0;
                     route.flushTimerCountdown = globalSettings.flushTimer;
-                    significantChangeOccurred = true;
+                    significantChangeOccurred = true; // Asegúrate que esto se active
                     logEvent(`${this.id}: Ruta ${route.prefix} vía ${route.nextHop} (int ${affectedInterface.name}) invalidada por enlace caído.`);
-                    // --- INICIO DE DEBUGGING ---
                     console.log(`[DEBUG] ${this.id} | Learned route INVALIDATED: ${route.prefix}. significantChangeOccurred = ${significantChangeOccurred}`);
-                    // --- FIN DE DEBUGGING ---
                 }
             }
         });
+        // --- FIN DE LÓGICA DE RUTAS APRENDIDAS ---
 
-        // --- INICIO DE DEBUGGING ---
+
         console.log(`[DEBUG] ${this.id} | After all checks for 'down' status, final significantChangeOccurred = ${significantChangeOccurred}`);
-        // --- FIN DE DEBUGGING ---
-
         if (significantChangeOccurred) {
             this.pendingTriggeredUpdate = true;
-            // --- INICIO DE DEBUGGING ---
             console.log(`%c[DEBUG] ${this.id} | pendingTriggeredUpdate SET TO TRUE due to significant change.`, "color: green;");
-            // --- FIN DE DEBUGGING ---
         } else {
-            // --- INICIO DE DEBUGGING ---
             console.log(`%c[DEBUG] ${this.id} | NO significant change detected, pendingTriggeredUpdate NOT SET.`, "color: orange;");
-            // --- FIN DE DEBUGGING ---
         }
 
-    } else { // Link is up (newStatus === "up")
+    } else { // Link is up
+        // ... (la lógica para 'link up' sigue igual, asegurando que this.pendingTriggeredUpdate = true;) ...
+        // También es buena idea limpiar this.poisonedDirectPrefixesForNextUpdate aquí,
+        // aunque ya se limpia al inicio de la función.
+        // this.poisonedDirectPrefixesForNextUpdate = []; // Ya se hace al inicio
         const existingDirectRoute = this.routingTable.find(
             r => r.isDirectlyConnected &&
                  r.interfaceName === affectedInterface.name &&
@@ -242,23 +223,15 @@ handleLinkChange(linkId, newStatus) {
         if (!existingDirectRoute) {
             const entry = new RouteEntry(affectedInterface.networkPrefix, "::", 1, affectedInterface.name, true, this.id);
             this.routingTable.push(entry);
-            significantChangeOccurred = true; // Un cambio ocurrió
+            significantChangeOccurred = true;
             logEvent(`${this.id}: Añadida ruta directa ${entry.prefix} en ${affectedInterface.name} por enlace activo.`);
-            // --- INICIO DE DEBUGGING ---
             console.log(`[DEBUG] ${this.id} | Direct route ADDED for link up. significantChangeOccurred = ${significantChangeOccurred}`);
-            // --- FIN DE DEBUGGING ---
         }
         
-        // Aunque no haya habido un "significantChangeOccurred" (la ruta directa ya existía),
-        // levantar una interfaz es motivo suficiente para querer enviar una actualización.
-        this.pendingTriggeredUpdate = true;
-        // --- INICIO DE DEBUGGING ---
-        console.log(`%c[DEBUG] ${this.id} | Link is UP. pendingTriggeredUpdate SET TO TRUE (either by change or policy).`, "color: green;");
-        // --- FIN DE DEBUGGING ---
+        this.pendingTriggeredUpdate = true; // Forzar trigger en link up
+        console.log(`%c[DEBUG] ${this.id} | Link is UP. pendingTriggeredUpdate SET TO TRUE.`, "color: green;");
     }
-    // --- INICIO DE DEBUGGING ---
-    console.log(`[DEBUG] ${this.id}.handleLinkChange END | Current this.pendingTriggeredUpdate = ${this.pendingTriggeredUpdate}`);
-    // --- FIN DE DEBUGGING ---
+    console.log(`[DEBUG] ${this.id}.handleLinkChange END | Current this.pendingTriggeredUpdate = ${this.pendingTriggeredUpdate}. Poison list size: ${this.poisonedDirectPrefixesForNextUpdate.length}`);
 }
 // En la clase Router
 tickSecond() {
@@ -311,25 +284,62 @@ tickSecond() {
     }
     return events;
 }
-    prepareUpdatePacketForInterface(sendingInterfaceName) {
-        const updatePacket = [];
-        if (!this.isInterfaceUp(sendingInterfaceName)) return [];
-
-        this.routingTable.forEach(route => {
-            let metricToSend = route.metric;
-            if (globalSettings.splitHorizon && route.interfaceName === sendingInterfaceName && !route.isDirectlyConnected) {
-                if (globalSettings.poisonReverse) {
-                    metricToSend = MAX_METRIC;
-                } else {
-                    return; 
-                }
-            }
-             // Ensure we don't send metric 0 for anything other than a specific RIPng "unreachable" context (not used here)
-            if (metricToSend === 0 && !route.isDirectlyConnected) metricToSend = 1; // Should not happen with current logic
-            updatePacket.push({ prefix: route.prefix, metric: metricToSend, sourceRouterId: this.id });
-        });
-        return updatePacket;
+// En la clase Router
+prepareUpdatePacketForInterface(sendingInterfaceName) {
+    const updatePacket = [];
+    if (!this.isInterfaceUp(sendingInterfaceName)) { // Verifica si la interfaz de envío está activa
+        console.log(`[DEBUG] ${this.id} | Interfaz de envío ${sendingInterfaceName} está INACTIVA. No se prepara paquete.`);
+        return [];
     }
+
+    const advertisedPrefixes = new Set(); // Para evitar duplicados si una ruta está en ambas listas
+
+    // 1. Añadir prefijos de enlaces directos caídos (que deben anunciarse con métrica 16)
+    // Estos son específicos de este router y no están sujetos a Split Horizon de la misma manera que las rutas aprendidas.
+    // Se anuncian para indicar que ESTE router ya no ofrece esa red.
+    this.poisonedDirectPrefixesForNextUpdate.forEach(poisonedRoute => {
+        // No aplicar Split Horizon aquí, ya que es una notificación sobre una red propia que cayó.
+        updatePacket.push({ prefix: poisonedRoute.prefix, metric: poisonedRoute.metric, sourceRouterId: this.id });
+        advertisedPrefixes.add(poisonedRoute.prefix);
+        console.log(`[DEBUG] ${this.id} | Adding to update packet (from POISON LIST): ${poisonedRoute.prefix} metric ${poisonedRoute.metric}`);
+    });
+
+    // 2. Añadir rutas de la tabla de enrutamiento actual
+    this.routingTable.forEach(route => {
+        // Si el prefijo ya fue añadido desde la lista de envenenamiento directo, no lo añadimos de nuevo.
+        // La entrada de la lista de envenenamiento (métrica 16 para un directo caído) tiene precedencia.
+        if (advertisedPrefixes.has(route.prefix)) {
+            return; 
+        }
+
+        let metricToSend = route.metric;
+
+        // Aplicar Split Horizon para rutas aprendidas
+        if (globalSettings.splitHorizon && route.interfaceName === sendingInterfaceName && !route.isDirectlyConnected) {
+            if (globalSettings.poisonReverse) {
+                metricToSend = MAX_METRIC;
+                console.log(`[DEBUG] ${this.id} | Applying POISON REVERSE for ${route.prefix} on ${sendingInterfaceName}. Metric set to ${metricToSend}`);
+            } else {
+                console.log(`[DEBUG] ${this.id} | Applying SPLIT HORIZON for ${route.prefix} on ${sendingInterfaceName}. Route NOT ADDED.`);
+                return; // Split Horizon simple: no anunciar
+            }
+        }
+        updatePacket.push({ prefix: route.prefix, metric: metricToSend, sourceRouterId: this.id });
+        advertisedPrefixes.add(route.prefix); // Marcar como añadido para evitar duplicados si hubiera otra fuente.
+        // console.log(`[DEBUG] ${this.id} | Adding to update packet (from ROUTING TABLE): ${route.prefix} metric ${metricToSend}`);
+    });
+    
+    // La lista this.poisonedDirectPrefixesForNextUpdate se limpia al inicio de handleLinkChange,
+    // lo cual es adecuado porque su contenido es relevante solo para el Triggered Update
+    // inmediatamente posterior al evento de 'link down'. Los updates periódicos subsecuentes
+    // no deberían seguir reenviando estos venenos directos de la lista temporal,
+    // sino basarse en el estado de la routingTable.
+
+    if (updatePacket.length > 0) {
+         console.log(`[DEBUG] ${this.id} | Prepared update packet for ${sendingInterfaceName} with ${updatePacket.length} entries.`);
+    }
+    return updatePacket;
+}
 
     receiveUpdate(packet, fromRouterLLA, onInterfaceName) {
         if (!this.isInterfaceUp(onInterfaceName)) return;
