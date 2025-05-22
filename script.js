@@ -43,15 +43,15 @@ const el = {
     linkToggleButtons: document.querySelectorAll('.link-toggle-button')
 };
 
-// --- Classes ---
+// En la clase RouteEntry
 class RouteEntry {
-    constructor(prefix, nextHop, metric, interfaceName, isDirectlyConnected = false, sourceRouterId = null) {
+    constructor(prefix, nextHop, metric, interfaceName, isDirectlyConnected = false, nextHopRouterId = null) { // Cambiado sourceRouterId a nextHopRouterId
         this.prefix = prefix;
-        this.nextHop = nextHop;
+        this.nextHop = nextHop; // LLA del siguiente salto o "::" para directo/local
         this.metric = metric;
-        this.interfaceName = interfaceName;
+        this.interfaceName = interfaceName; // Interfaz en ESTE router
         this.isDirectlyConnected = isDirectlyConnected;
-        this.sourceRouterId = sourceRouterId;
+        this.nextHopRouterId = nextHopRouterId; // ID del router del siguiente salto (ej: "R1", "R2")
 
         this.invalidTimerCountdown = globalSettings.invalidTimer;
         this.flushTimerCountdown = globalSettings.flushTimer;
@@ -60,8 +60,12 @@ class RouteEntry {
         if (isDirectlyConnected) {
             this.invalidTimerCountdown = Infinity;
             this.flushTimerCountdown = Infinity;
+            this.nextHopRouterId = this.nextHopRouterId || 'Local'; // Si es directo, el "nextHopRouterId" es el propio router o 'Local'
         }
     }
+
+    // ... (resto de los métodos de RouteEntry como resetTimers, tickSecond sin cambios necesarios aquí) ...
+}
 
     resetTimers(newMetric) {
         if (this.isDirectlyConnected) return;
@@ -126,18 +130,19 @@ class Router {
     }
      // En la clase Router
     // Esta función se llama UNA VEZ al crear el router o en un reset completo.
-    _initializeDirectlyConnectedRoutesOnce() {
-        // Eliminar solo las rutas directamente conectadas antiguas antes de añadir las actuales
-        this.routingTable = this.routingTable.filter(route => !route.isDirectlyConnected);
-    
-        this.interfaces.forEach(iface => {
-            if (this.isInterfaceUp(iface.name) && iface.ripEnabled) {
-                const entry = new RouteEntry(iface.networkPrefix, "::", 1, iface.name, true, this.id);
-                this.routingTable.push(entry);
-                // No es necesario logEvent aquí ya que es parte de la inicialización general
-            }
-        });
-    }
+   // En la clase Router
+_initializeDirectlyConnectedRoutesOnce() {
+    this.routingTable = this.routingTable.filter(route => !route.isDirectlyConnected);
+    this.interfaces.forEach(iface => {
+        if (this.isInterfaceUp(iface.name) && iface.ripEnabled) {
+            // Pasamos 'this.id' como nextHopRouterId para rutas directas.
+            // O podríamos pasar null y dejar que el constructor de RouteEntry lo maneje como 'Local'.
+            // Para consistencia, pasemos this.id, y la UI decidirá cómo mostrarlo.
+            const entry = new RouteEntry(iface.networkPrefix, "::", 1, iface.name, true, this.id);
+            this.routingTable.push(entry);
+        }
+    });
+}
 
 // En la clase Router
 handleLinkChange(linkId, newStatus) {
@@ -220,7 +225,9 @@ handleLinkChange(linkId, newStatus) {
                  r.prefix === affectedInterface.networkPrefix
         );
 
+        // En la clase Router, dentro de handleLinkChange, en el bloque 'else { // Link is up ... }'
         if (!existingDirectRoute) {
+            // Pasamos 'this.id' como nextHopRouterId
             const entry = new RouteEntry(affectedInterface.networkPrefix, "::", 1, affectedInterface.name, true, this.id);
             this.routingTable.push(entry);
             significantChangeOccurred = true;
@@ -381,7 +388,7 @@ prepareUpdatePacketForInterface(sendingInterfaceName) {
                         existingRoute.nextHop = fromRouterLLA;
                         existingRoute.metric = newMetric;
                         existingRoute.interfaceName = onInterfaceName;
-                        existingRoute.sourceRouterId = receivedRoute.sourceRouterId;
+                        existingRoute.nextHopRouterId = receivedRoute.sourceRouterId;
                         existingRoute.resetTimers(newMetric);
                         tableChanged = true;
                         logEvent(`${this.id}: Ruta ${receivedRoute.prefix} cambiada a ${fromRouterLLA} (int ${onInterfaceName}), nueva métrica ${newMetric}.`);
@@ -392,7 +399,8 @@ prepareUpdatePacketForInterface(sendingInterfaceName) {
                     const newEntry = new RouteEntry(receivedRoute.prefix, fromRouterLLA, newMetric, onInterfaceName, false, receivedRoute.sourceRouterId);
                     this.routingTable.push(newEntry);
                     tableChanged = true;
-                    logEvent(`${this.id}: Nueva ruta ${receivedRoute.prefix} aprendida de ${fromRouterLLA} (int ${onInterfaceName}), métrica ${newMetric}.`);
+                    logEvent(`${this.id}: Nueva ruta ${receivedRoute.prefix} aprendida de ${fromRouterLLA} (int ${onInterfaceName}), métrica ${newMetric}, prox. salto ID: ${receivedRoute.sourceRouterId}.`);
+        
                 }
             }
         });
@@ -509,7 +517,12 @@ function updateRoutingTableDisplay(router) {
     router.routingTable.sort((a, b) => a.prefix.localeCompare(b.prefix)).forEach(route => {
         const row = tableBody.insertRow();
         row.insertCell().textContent = route.prefix;
-        row.insertCell().textContent = route.nextHop;
+        const nextHopCell = row.insertCell();
+        if (route.isDirectlyConnected || route.nextHop === "::") {
+            nextHopCell.textContent = "Local"; // O "Directo", o dejar "::" si se prefiere
+        } else {
+            nextHopCell.textContent = route.nextHopRouterId || route.nextHop; // Muestra el ID si está, sino el LLA como fallback
+        }      
         const metricCell = row.insertCell();
         metricCell.textContent = route.metric;
         if (route.metric === MAX_METRIC) metricCell.classList.add('metric-invalid');
