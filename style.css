@@ -1,14 +1,41 @@
 body {
     font-family: sans-serif;
-    margin: 20px;
+    margin: 0; /* Reset margin */
+    padding: 0; /* Reset padding */
     background-color: #f4f4f4;
+    display: flex; /* Para layout de dos columnas */
+    flex-direction: column; /* Para el H1 arriba */
+    align-items: center; /* Centrar H1 */
 }
 
-h1, h2, h3, h4 {
+h1 {
     color: #333;
+    text-align: center;
+    width: 100%;
+    padding: 10px 0;
+    margin-bottom: 10px;
 }
 
-.controls-container, .network-container, .log-container {
+.main-container {
+    display: flex;
+    width: 100%;
+    max-width: 1600px; /* Limitar ancho máximo */
+    padding: 0 10px; /* Padding lateral */
+    box-sizing: border-box;
+}
+
+.left-panel {
+    flex: 1; /* Ocupa una fracción del espacio */
+    padding-right: 10px; /* Espacio entre paneles */
+    min-width: 380px;
+}
+
+.right-panel {
+    flex: 3; /* Ocupa más espacio */
+}
+
+
+.controls-container, .log-container {
     background-color: #fff;
     padding: 15px;
     margin-bottom: 20px;
@@ -22,13 +49,44 @@ h1, h2, h3, h4 {
 
 .control-group label {
     margin-right: 10px;
-    min-width: 150px;
+    min-width: 150px; /* Ajustar según sea necesario */
     display: inline-block;
 }
 
 .control-group input[type="number"], .control-group input[type="checkbox"] {
     margin-right: 20px;
 }
+
+.link-control {
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.link-control span {
+    margin-right: 10px;
+}
+
+.link-toggle-button {
+    padding: 5px 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.link-toggle-button.active {
+    background-color: #5cb85c; /* Verde para activo */
+    color: white;
+    border-color: #4cae4c;
+}
+
+.link-toggle-button.inactive {
+    background-color: #d9534f; /* Rojo para inactivo */
+    color: white;
+    border-color: #d43f3a;
+}
+
 
 .simulation-buttons button {
     padding: 8px 15px;
@@ -56,13 +114,40 @@ h1, h2, h3, h4 {
     border-radius: 5px;
     min-width: 300px;
     flex: 1;
+    background-color: #fff; /* Fondo blanco para routers */
+    box-shadow: 0 0 5px rgba(0,0,0,0.05);
 }
+
+.router-display h3 .update-indicator {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: transparent;
+    margin-left: 8px;
+    transition: background-color 0.5s ease;
+}
+
+.router-display h3 .update-indicator.sending {
+    background-color: #3498db; /* Azul cuando envía */
+}
+
 
 .router-display .interfaces p {
     font-size: 0.9em;
     margin: 5px 0;
     color: #555;
+    padding: 3px;
+    border-radius: 3px;
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
+
+.router-display .interfaces p.link-down {
+    background-color: #f8d7da; /* Fondo rojo claro */
+    color: #721c24; /* Texto rojo oscuro */
+    text-decoration: line-through;
+}
+
 
 table {
     width: 100%;
@@ -80,12 +165,18 @@ th {
     background-color: #f0f0f0;
 }
 
+td.metric-invalid {
+    color: #d9534f; /* Rojo para métrica 16 */
+    font-weight: bold;
+}
+
+
 .log-container {
     margin-top: 20px;
 }
 
 #eventLog {
-    height: 200px;
+    height: 200px; /* Ajustar altura según necesidad */
     overflow-y: scroll;
     border: 1px solid #ddd;
     padding: 10px;
