@@ -260,40 +260,57 @@ handleLinkChange(linkId, newStatus) {
     console.log(`[DEBUG] ${this.id}.handleLinkChange END | Current this.pendingTriggeredUpdate = ${this.pendingTriggeredUpdate}`);
     // --- FIN DE DEBUGGING ---
 }
+// En la clase Router
+tickSecond() {
+    let events = [];
 
-    tickSecond() {
-        let events = [];
-        for (let i = this.routingTable.length - 1; i >= 0; i--) {
-            const route = this.routingTable[i];
-            const event = route.tickSecond(this.id);
-            if (event) {
-                if (event.type === 'route_flushed') {
-                    this.routingTable.splice(i, 1);
-                    this.pendingTriggeredUpdate = true;
-                } else if (event.type === 'route_invalidated') {
-                    this.pendingTriggeredUpdate = true;
-                }
+    // 1. Lógica de timers de ruta (esta parte es importante y debe estar presente)
+    for (let i = this.routingTable.length - 1; i >= 0; i--) {
+        const route = this.routingTable[i];
+        const event = route.tickSecond(this.id); // Llama a RouteEntry.tickSecond
+        if (event) {
+            if (event.type === 'route_flushed') {
+                this.routingTable.splice(i, 1);
+                this.pendingTriggeredUpdate = true; // Un cambio ocurrió
+            } else if (event.type === 'route_invalidated') {
+                // La ruta ya está marcada con métrica 16 por RouteEntry.tickSecond
+                this.pendingTriggeredUpdate = true; // Un cambio ocurrió
             }
         }
- // --- INICIO DE DEBUGGING ---
-    if (this.pendingTriggeredUpdate) { // Solo loguea si hay una posibilidad de trigger
-        console.log(`%c[DEBUG] ${this.id}.tickSecond | UpdateCountdown: ${this.updateTimerCountdown} | pendingTriggeredUpdate: ${this.pendingTriggeredUpdate} | globalSettings.triggeredUpdates: ${globalSettings.triggeredUpdates}`, "color: purple");
+    }
+
+    // --- INICIO DE DEBUGGING ---
+    // Loguear solo si hay una posibilidad de trigger o si el contador está cerca de cero, para no llenar la consola innecesariamente.
+    if (this.pendingTriggeredUpdate || this.updateTimerCountdown <= 1) {
+        console.log(`%c[DEBUG] ${this.id}.tickSecond PRE-CHECK | UpdateCountdown: ${this.updateTimerCountdown} | pendingTriggeredUpdate: ${this.pendingTriggeredUpdate} | globalSettings.triggeredUpdates: ${globalSettings.triggeredUpdates}`, "color: purple");
     }
     // --- FIN DE DEBUGGING ---
 
+    // 2. Lógica del Update Timer de RIPng
     this.updateTimerCountdown--;
     if (this.updateTimerCountdown <= 0 || (this.pendingTriggeredUpdate && globalSettings.triggeredUpdates)) {
+        
+        const isTriggeredByFlag = (this.pendingTriggeredUpdate && globalSettings.triggeredUpdates);
+        const reasonForUpdate = (this.updateTimerCountdown <= 0 && !isTriggeredByFlag) ? 'Timer Expired' : 
+                                (isTriggeredByFlag && this.updateTimerCountdown > 0) ? 'Pending Trigger' :
+                                (isTriggeredByFlag && this.updateTimerCountdown <=0) ? 'Timer Expired & Pending Trigger' : 'Unknown';
+
+
         // --- INICIO DE DEBUGGING ---
-        const wasTriggeredByFlag = (this.pendingTriggeredUpdate && globalSettings.triggeredUpdates);
-        console.log(`%c[DEBUG] ${this.id}.tickSecond | SCHEDULING UPDATE. Reason: ${this.updateTimerCountdown <= 0 ? 'Timer Expired' : 'Pending Trigger'}. IsTriggered: ${wasTriggeredByFlag}`, "background-color: yellow; color: black");
+        console.log(`%c[DEBUG] ${this.id}.tickSecond | SCHEDULING UPDATE. Reason: ${reasonForUpdate}. IsTriggered (final): ${isTriggeredByFlag}`, "background-color: yellow; color: black");
         // --- FIN DE DEBUGGING ---
         
-        events.push({ type: 'send_update', routerId: this.id, isTriggered: wasTriggeredByFlag });
-        this.updateTimerCountdown = globalSettings.updateTimer;
-        this.pendingTriggeredUpdate = false; // Se resetea aquí
+        events.push({ type: 'send_update', routerId: this.id, isTriggered: isTriggeredByFlag });
+        
+        this.updateTimerCountdown = globalSettings.updateTimer; // Resetear el timer periódico
+        this.pendingTriggeredUpdate = false; // Resetear la bandera de trigger aquí, después de usarla
+        
+        // --- INICIO DE DEBUGGING ---
+        // console.log(`%c[DEBUG] ${this.id}.tickSecond | pendingTriggeredUpdate RESET TO FALSE.`, "color: red");
+        // --- FIN DE DEBUGGING ---
     }
     return events;
-
+}
     prepareUpdatePacketForInterface(sendingInterfaceName) {
         const updatePacket = [];
         if (!this.isInterfaceUp(sendingInterfaceName)) return [];
