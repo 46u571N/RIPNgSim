@@ -42,10 +42,9 @@ const el = {
     },
     linkToggleButtons: document.querySelectorAll('.link-toggle-button')
 };
-
 // En la clase RouteEntry
 class RouteEntry {
-    constructor(prefix, nextHop, metric, interfaceName, isDirectlyConnected = false, nextHopRouterId = null) { // Cambiado sourceRouterId a nextHopRouterId
+    constructor(prefix, nextHop, metric, interfaceName, isDirectlyConnected = false, nextHopRouterId = null) {
         this.prefix = prefix;
         this.nextHop = nextHop; // LLA del siguiente salto o "::" para directo/local
         this.metric = metric;
@@ -55,17 +54,17 @@ class RouteEntry {
 
         this.invalidTimerCountdown = globalSettings.invalidTimer;
         this.flushTimerCountdown = globalSettings.flushTimer;
-        this.markedForDeletion = false;
+        this.markedForDeletion = false; // Esta es la línea que probablemente era la 70. Asegúrate de que termine con ';'
 
         if (isDirectlyConnected) {
             this.invalidTimerCountdown = Infinity;
             this.flushTimerCountdown = Infinity;
-            this.nextHopRouterId = this.nextHopRouterId || 'Local'; // Si es directo, el "nextHopRouterId" es el propio router o 'Local'
+            // Si es directo, el nextHopRouterId podría ser el ID del propio router o una etiqueta como "Local".
+            // Si nextHopRouterId ya fue pasado como this.id (como hicimos), está bien.
+            // Si fue pasado como null, podemos asignarle 'Local'.
+            this.nextHopRouterId = this.nextHopRouterId || 'Local'; 
         }
     }
-
-    // ... (resto de los métodos de RouteEntry como resetTimers, tickSecond sin cambios necesarios aquí) ...
-}
 
     resetTimers(newMetric) {
         if (this.isDirectlyConnected) return;
@@ -85,13 +84,13 @@ class RouteEntry {
                 this.markedForDeletion = true;
                 this.invalidTimerCountdown = 0;
                 this.flushTimerCountdown = globalSettings.flushTimer;
-                logEvent(`${routerId}: Ruta ${this.prefix} vía ${this.nextHop} marcada inválida (timeout), métrica ${MAX_METRIC}.`);
+                logEvent(`${routerId}: Ruta ${this.prefix} vía ${this.nextHopRouterId || this.nextHop} marcada inválida (timeout), métrica ${MAX_METRIC}.`);
                 return { type: 'route_invalidated', routerId, prefix: this.prefix };
             }
         } else {
             this.flushTimerCountdown--;
             if (this.flushTimerCountdown <= 0) {
-                logEvent(`${routerId}: Ruta ${this.prefix} vía ${this.nextHop} eliminada (flush timeout).`);
+                logEvent(`${routerId}: Ruta ${this.prefix} vía ${this.nextHopRouterId || this.nextHop} eliminada (flush timeout).`);
                 return { type: 'route_flushed', routerId, prefix: this.prefix };
             }
         }
