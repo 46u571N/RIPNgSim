@@ -1,5 +1,6 @@
 // --- Global Configuration & State ---
 let routers = [];
+let globalLinks = {}; // Nuevo: para manejar el estado de los enlaces
 let globalSettings = {
     updateTimer: 30,
     invalidTimer: 180,
@@ -27,30 +28,37 @@ const el = {
     resetButton: document.getElementById('resetButton'),
     simulationTimeDisplay: document.getElementById('simulationTimeDisplay'),
     eventLog: document.getElementById('eventLog'),
+    routerDisplays: { // Para indicadores de actualización
+        R1: document.getElementById('R1-update-indicator'),
+        R2: document.getElementById('R2-update-indicator'),
+        R3: document.getElementById('R3-update-indicator'),
+        R4: document.getElementById('R4-update-indicator'),
+    },
     routerTables: {
         R1: document.getElementById('R1-table').getElementsByTagName('tbody')[0],
         R2: document.getElementById('R2-table').getElementsByTagName('tbody')[0],
         R3: document.getElementById('R3-table').getElementsByTagName('tbody')[0],
         R4: document.getElementById('R4-table').getElementsByTagName('tbody')[0],
-    }
+    },
+    linkToggleButtons: document.querySelectorAll('.link-toggle-button')
 };
 
 // --- Classes ---
 class RouteEntry {
     constructor(prefix, nextHop, metric, interfaceName, isDirectlyConnected = false, sourceRouterId = null) {
         this.prefix = prefix;
-        this.nextHop = nextHop; // LLA of the advertising router
+        this.nextHop = nextHop;
         this.metric = metric;
-        this.interfaceName = interfaceName; // Interface on THIS router
+        this.interfaceName = interfaceName;
         this.isDirectlyConnected = isDirectlyConnected;
-        this.sourceRouterId = sourceRouterId; // ID of the router that advertised this route
+        this.sourceRouterId = sourceRouterId;
 
         this.invalidTimerCountdown = globalSettings.invalidTimer;
         this.flushTimerCountdown = globalSettings.flushTimer;
-        this.markedForDeletion = false; // True when metric becomes 16
+        this.markedForDeletion = false;
 
         if (isDirectlyConnected) {
-            this.invalidTimerCountdown = Infinity; // Direct routes don't time out this way
+            this.invalidTimerCountdown = Infinity;
             this.flushTimerCountdown = Infinity;
         }
     }
@@ -60,8 +68,7 @@ class RouteEntry {
         this.metric = newMetric;
         this.invalidTimerCountdown = globalSettings.invalidTimer;
         this.markedForDeletion = false;
-        // When a route is updated (not from poison), its flush timer should also be reset/stopped
-        this.flushTimerCountdown = globalSettings.flushTimer; 
+        this.flushTimerCountdown = globalSettings.flushTimer;
     }
 
     tickSecond(routerId) {
@@ -72,7 +79,7 @@ class RouteEntry {
             if (this.invalidTimerCountdown <= 0) {
                 this.metric = MAX_METRIC;
                 this.markedForDeletion = true;
-                this.invalidTimerCountdown = 0; // Stop it
+                this.invalidTimerCountdown = 0;
                 this.flushTimerCountdown = globalSettings.flushTimer;
                 logEvent(`${routerId}: Ruta ${this.prefix} vía ${this.nextHop} marcada inválida (timeout), métrica ${MAX_METRIC}.`);
                 return { type: 'route_invalidated', routerId, prefix: this.prefix };
@@ -92,56 +99,96 @@ class Router {
     constructor(id, name, interfacesConfig) {
         this.id = id;
         this.name = name;
-        // interfacesConfig = [{ name: "eth0", ip: "2000:1::1/64", networkPrefix: "2000:1::/64", connectedToRouterId: "R2", connectedToInterfaceName: "eth1", status: "up"}]
+        // interfacesConfig = [{ name: "eth0", ip: "2000:1::1/64", networkPrefix: "2000:1::/64", linkId: "L1", mapsToRouter: "R2", mapsToInterface: "eth1" }]
         this.interfaces = interfacesConfig.map(iface => ({
             ...iface,
-            linkLocalAddress: `fe80::${this.id}:${iface.name}`, // Simplified LLA
-            ripEnabled: true, // Assuming all interfaces participate in RIP initially
+            linkLocalAddress: `fe80::${this.id}:${iface.name}`,
+            ripEnabled: true,
         }));
-        this.routingTable = []; // Array of RouteEntry
-        this.updateTimerCountdown = Math.floor(Math.random() * globalSettings.updateTimer) + 1; // Random initial offset
+        this.routingTable = [];
+        this.updateTimerCountdown = Math.floor(Math.random() * globalSettings.updateTimer) + 1;
         this.pendingTriggeredUpdate = false;
     }
 
     getInterfaceByName(name) {
         return this.interfaces.find(iface => iface.name === name);
     }
-    
-    getInterfaceByNetwork(networkPrefix) {
-        return this.interfaces.find(iface => iface.networkPrefix === networkPrefix);
+
+    getInterfaceByLinkId(linkId) {
+        return this.interfaces.find(iface => iface.linkId === linkId);
     }
 
+    isInterfaceUp(interfaceName) {
+        const iface = this.getInterfaceByName(interfaceName);
+        if (!iface || !iface.linkId) return false; // No link ID means it's not part of a manageable link
+        return globalLinks[iface.linkId]?.status === "up";
+    }
+    
     initializeDirectlyConnectedRoutes() {
         this.routingTable = [];
         this.interfaces.forEach(iface => {
-            if (iface.status === "up" && iface.ripEnabled) {
-                // Add route to the network segment itself
+            if (this.isInterfaceUp(iface.name) && iface.ripEnabled) {
                 const entry = new RouteEntry(iface.networkPrefix, "::", 1, iface.name, true, this.id);
                 this.routingTable.push(entry);
             }
         });
     }
 
+    handleLinkChange(linkId, newStatus) {
+        const affectedInterface = this.getInterfaceByLinkId(linkId);
+        if (!affectedInterface) return;
+
+        logEvent(`${this.id}: Enlace ${linkId} (interfaz ${affectedInterface.name}) cambió a ${newStatus}.`);
+
+        if (newStatus === "down") {
+            // Remove directly connected route for this interface's network
+            this.routingTable = this.routingTable.filter(route => {
+                if (route.isDirectlyConnected && route.interfaceName === affectedInterface.name) {
+                    logEvent(`${this.id}: Eliminada ruta directa ${route.prefix} por interfaz ${affectedInterface.name} caída.`);
+                    return false;
+                }
+                return true;
+            });
+
+            // Invalidate routes learned via this interface
+            this.routingTable.forEach(route => {
+                if (!route.isDirectlyConnected && route.interfaceName === affectedInterface.name) {
+                    if (route.metric < MAX_METRIC) {
+                        route.metric = MAX_METRIC;
+                        route.markedForDeletion = true;
+                        route.invalidTimerCountdown = 0; // Mark for immediate flush start
+                        route.flushTimerCountdown = globalSettings.flushTimer;
+                        this.pendingTriggeredUpdate = true;
+                        logEvent(`${this.id}: Ruta ${route.prefix} vía ${route.nextHop} (int ${affectedInterface.name}) invalidada por enlace caído.`);
+                    }
+                }
+            });
+        } else { // Link is up
+            // Re-add directly connected route if it doesn't exist
+            this.initializeDirectlyConnectedRoutes(); // Simplest way to re-add direct, will also re-check other interfaces
+            this.pendingTriggeredUpdate = true; // Announce newly available direct network
+        }
+    }
+
+
     tickSecond() {
         let events = [];
-        // Route timers
         for (let i = this.routingTable.length - 1; i >= 0; i--) {
             const route = this.routingTable[i];
             const event = route.tickSecond(this.id);
             if (event) {
                 if (event.type === 'route_flushed') {
                     this.routingTable.splice(i, 1);
-                    this.pendingTriggeredUpdate = true; // A route was removed
+                    this.pendingTriggeredUpdate = true;
                 } else if (event.type === 'route_invalidated') {
-                    this.pendingTriggeredUpdate = true; // Metric changed to 16
+                    this.pendingTriggeredUpdate = true;
                 }
             }
         }
 
-        // RIPng Update Timer
         this.updateTimerCountdown--;
         if (this.updateTimerCountdown <= 0 || (this.pendingTriggeredUpdate && globalSettings.triggeredUpdates)) {
-            this.updateTimerCountdown = globalSettings.updateTimer; // Reset regular timer
+            this.updateTimerCountdown = globalSettings.updateTimer;
             events.push({ type: 'send_update', routerId: this.id, isTriggered: this.pendingTriggeredUpdate });
             this.pendingTriggeredUpdate = false;
         }
@@ -150,66 +197,60 @@ class Router {
 
     prepareUpdatePacketForInterface(sendingInterfaceName) {
         const updatePacket = [];
-        const sendingInterface = this.getInterfaceByName(sendingInterfaceName);
-        if (!sendingInterface || sendingInterface.status !== "up" || !sendingInterface.ripEnabled) return [];
+        if (!this.isInterfaceUp(sendingInterfaceName)) return [];
 
         this.routingTable.forEach(route => {
             let metricToSend = route.metric;
-            // Split Horizon
             if (globalSettings.splitHorizon && route.interfaceName === sendingInterfaceName && !route.isDirectlyConnected) {
                 if (globalSettings.poisonReverse) {
                     metricToSend = MAX_METRIC;
                 } else {
-                    return; // Simple Split Horizon: Don't advertise
+                    return; 
                 }
             }
+             // Ensure we don't send metric 0 for anything other than a specific RIPng "unreachable" context (not used here)
+            if (metricToSend === 0 && !route.isDirectlyConnected) metricToSend = 1; // Should not happen with current logic
             updatePacket.push({ prefix: route.prefix, metric: metricToSend, sourceRouterId: this.id });
         });
         return updatePacket;
     }
 
     receiveUpdate(packet, fromRouterLLA, onInterfaceName) {
+        if (!this.isInterfaceUp(onInterfaceName)) return;
+        
         const receivingInterface = this.getInterfaceByName(onInterfaceName);
-        if (!receivingInterface || receivingInterface.status !== "up" || !receivingInterface.ripEnabled) return;
-
         logEvent(`${this.id}: Recibida actualización de ${fromRouterLLA} en ${onInterfaceName} con ${packet.length} entradas.`);
         let tableChanged = false;
 
         packet.forEach(receivedRoute => {
-            // Do not learn about own interface/network from others on that same segment.
             if (receivedRoute.prefix === receivingInterface.networkPrefix && receivedRoute.metric < MAX_METRIC) {
-                 // This can happen if another router advertises the shared link.
-                 // Generally, a router knows its directly connected networks best.
                 return;
             }
 
-            let newMetric = receivedRoute.metric + 1; // Cost of link to neighbor is 1
+            let newMetric = receivedRoute.metric + 1;
             if (newMetric > MAX_METRIC) newMetric = MAX_METRIC;
 
             let existingRoute = this.routingTable.find(r => r.prefix === receivedRoute.prefix);
 
             if (existingRoute) {
-                if (existingRoute.isDirectlyConnected) return; // Never overwrite directly connected with learned
+                if (existingRoute.isDirectlyConnected) return;
 
-                // Update from the same source (next-hop)
-                if (existingRoute.nextHop === fromRouterLLA) {
-                    if (newMetric < existingRoute.metric) { // Better path from same neighbor
-                        existingRoute.resetTimers(newMetric);
-                        tableChanged = true;
-                        logEvent(`${this.id}: Ruta ${receivedRoute.prefix} actualizada vía ${fromRouterLLA}, nueva métrica ${newMetric}.`);
+                if (existingRoute.nextHop === fromRouterLLA && existingRoute.interfaceName === onInterfaceName) { // Same path
+                    if (newMetric < MAX_METRIC) { // Regular update or better path
+                         if (newMetric < existingRoute.metric || newMetric === existingRoute.metric ) { // update if better or same (to reset timer)
+                            if(newMetric < existingRoute.metric) tableChanged = true; // only set changed if metric is better
+                            existingRoute.resetTimers(newMetric);
+                            logEvent(`${this.id}: Ruta ${receivedRoute.prefix} vía ${fromRouterLLA} refrescada/actualizada, nueva métrica ${newMetric}.`);
+                         }
                     } else if (newMetric === MAX_METRIC && existingRoute.metric < MAX_METRIC) { // Route poisoned by neighbor
                         existingRoute.metric = MAX_METRIC;
                         existingRoute.markedForDeletion = true;
-                        existingRoute.invalidTimerCountdown = 0; // Trigger invalid state handling
+                        existingRoute.invalidTimerCountdown = 0;
                         existingRoute.flushTimerCountdown = globalSettings.flushTimer;
                         tableChanged = true;
                         logEvent(`${this.id}: Ruta ${receivedRoute.prefix} envenenada por ${fromRouterLLA}.`);
-                    } else if (newMetric === existingRoute.metric && newMetric < MAX_METRIC) { // Same route, refresh timer
-                        existingRoute.resetTimers(newMetric); // Keep existing metric, just refresh
-                    } else if (newMetric > existingRoute.metric && newMetric < MAX_METRIC) {
-                        // Worse metric from same neighbor, ignore unless it's a poison.
                     }
-                } else { // Update from a different source
+                } else { // Different path or different neighbor
                     if (newMetric < existingRoute.metric) {
                         existingRoute.nextHop = fromRouterLLA;
                         existingRoute.metric = newMetric;
@@ -237,29 +278,35 @@ class Router {
 }
 
 // --- Simulation Logic ---
+function initializeLinks() {
+    globalLinks = {
+        "L1": { id: "L1", name: "R1-S1-R2", status: "up", peers: [{routerId: "R1", iface: "eth0"}, {routerId: "R2", iface: "eth1"}] },
+        "L2": { id: "L2", name: "R2-S2-R4", status: "up", peers: [{routerId: "R2", iface: "eth0"}, {routerId: "R4", iface: "eth1"}] },
+        "L3": { id: "L3", name: "R3-S3-R4", status: "up", peers: [{routerId: "R3", iface: "eth1"}, {routerId: "R4", iface: "eth0"}] }
+    };
+    updateLinkVisuals();
+}
+
+
 function initializeSimulationState() {
     simulationTime = 0;
     eventLog = [];
     routers = [];
-
-    // Define Routers and their interfaces based on the diagram
-    // R1 <-> R2 (via S1) on 2000:1::/64
-    // R2 <-> R4 (via S2) on 2000:2::/64
-    // R3 <-> R4 (via S3) on 2000:3::/64
+    initializeLinks(); // Initialize links first
 
     const r1 = new Router("R1", "Router 1", [
-        { name: "eth0", ip: "2000:1::1/64", networkPrefix: "2000:1::/64", connectedToRouterId: "R2", connectedToInterfaceName: "eth1", status: "up" }
+        { name: "eth0", ip: "2000:1::1/64", networkPrefix: "2000:1::/64", linkId: "L1" }
     ]);
     const r2 = new Router("R2", "Router 2", [
-        { name: "eth1", ip: "2000:1::2/64", networkPrefix: "2000:1::/64", connectedToRouterId: "R1", connectedToInterfaceName: "eth0", status: "up" },
-        { name: "eth0", ip: "2000:2::2/64", networkPrefix: "2000:2::/64", connectedToRouterId: "R4", connectedToInterfaceName: "eth1", status: "up" }
+        { name: "eth1", ip: "2000:1::2/64", networkPrefix: "2000:1::/64", linkId: "L1" },
+        { name: "eth0", ip: "2000:2::2/64", networkPrefix: "2000:2::/64", linkId: "L2" }
     ]);
     const r3 = new Router("R3", "Router 3", [
-        { name: "eth1", ip: "2000:3::1/64", networkPrefix: "2000:3::/64", connectedToRouterId: "R4", connectedToInterfaceName: "eth0", status: "up" }
+        { name: "eth1", ip: "2000:3::1/64", networkPrefix: "2000:3::/64", linkId: "L3" }
     ]);
     const r4 = new Router("R4", "Router 4", [
-        { name: "eth0", ip: "2000:3::2/64", networkPrefix: "2000:3::/64", connectedToRouterId: "R3", connectedToInterfaceName: "eth1", status: "up" },
-        { name: "eth1", ip: "2000:2::1/64", networkPrefix: "2000:2::/64", connectedToRouterId: "R2", connectedToInterfaceName: "eth0", status: "up" }
+        { name: "eth0", ip: "2000:3::2/64", networkPrefix: "2000:3::/64", linkId: "L3" },
+        { name: "eth1", ip: "2000:2::1/64", networkPrefix: "2000:2::/64", linkId: "L2" }
     ]);
 
     routers = [r1, r2, r3, r4];
@@ -273,7 +320,6 @@ function simulationTick() {
     simulationTime++;
     let scheduledUpdates = [];
 
-    // 1. Process router timers and collect events (like need to send update)
     routers.forEach(router => {
         const events = router.tickSecond();
         events.forEach(event => {
@@ -283,71 +329,76 @@ function simulationTick() {
         });
     });
 
-    // 2. Process scheduled updates (send and receive)
     scheduledUpdates.forEach(updateOrder => {
         const sendingRouter = routers.find(r => r.id === updateOrder.routerId);
         if (!sendingRouter) return;
 
-        logEvent(`${sendingRouter.id} enviando ${updateOrder.isTriggered ? 'TRIGGERED' : 'REGULAR'} update. (T=${simulationTime}s)`);
+        logEvent(`${sendingRouter.id} enviando ${updateOrder.isTriggered ? 'TRIGGERED' : 'REGULAR'} update.`);
+        showUpdateIndicator(sendingRouter.id, true);
+
 
         sendingRouter.interfaces.forEach(sendingInterface => {
-            if (sendingInterface.status !== "up" || !sendingInterface.ripEnabled) return;
+            if (!sendingRouter.isInterfaceUp(sendingInterface.name) || !sendingInterface.ripEnabled) return;
 
             const packet = sendingRouter.prepareUpdatePacketForInterface(sendingInterface.name);
             if (packet.length === 0) return;
 
-            // Find neighbor router(s) on this interface's network segment
-            // Simplified: direct connection based on config
-            const neighborRouterId = sendingInterface.connectedToRouterId;
-            const neighborInterfaceName = sendingInterface.connectedToInterfaceName;
+            // Find neighbor on this link
+            const link = globalLinks[sendingInterface.linkId];
+            if (!link || link.status !== "up") return;
 
-            if (neighborRouterId && neighborInterfaceName) {
-                const neighborRouter = routers.find(r => r.id === neighborRouterId);
-                if (neighborRouter) {
-                    const neighborReceivingInterface = neighborRouter.getInterfaceByName(neighborInterfaceName);
-                    if (neighborReceivingInterface && neighborReceivingInterface.status === "up" && neighborReceivingInterface.ripEnabled) {
-                         // Simulate packet delivery
-                        neighborRouter.receiveUpdate(packet, sendingInterface.linkLocalAddress, neighborInterfaceName);
+            link.peers.forEach(peer => {
+                if (peer.routerId !== sendingRouter.id) { // This is the neighbor
+                    const neighborRouter = routers.find(r => r.id === peer.routerId);
+                    if (neighborRouter) {
+                         // Ensure neighbor's side of the link is also considered "up" for reception
+                        if(neighborRouter.isInterfaceUp(peer.iface)){
+                            neighborRouter.receiveUpdate(packet, sendingInterface.linkLocalAddress, peer.iface);
+                        }
                     }
                 }
-            }
+            });
         });
+        // Turn off indicator after a short delay
+        setTimeout(() => showUpdateIndicator(sendingRouter.id, false), 500);
     });
 
     updateAllDisplays();
 }
 
-
 // --- UI Update Functions ---
 function updateAllDisplays() {
     el.simulationTimeDisplay.textContent = simulationTime;
     routers.forEach(router => updateRoutingTableDisplay(router));
-    updateEventLogDisplay(); // Call this last to show latest events
+    updateLinkVisuals(); // Update visual state of links/interfaces
+    updateEventLogDisplay();
 }
 
 function updateRoutingTableDisplay(router) {
     const tableBody = el.routerTables[router.id];
     if (!tableBody) return;
-    tableBody.innerHTML = ''; // Clear existing rows
+    tableBody.innerHTML = ''; 
 
-    router.routingTable.sort((a,b) => a.prefix.localeCompare(b.prefix)).forEach(route => {
+    router.routingTable.sort((a, b) => a.prefix.localeCompare(b.prefix)).forEach(route => {
         const row = tableBody.insertRow();
         row.insertCell().textContent = route.prefix;
         row.insertCell().textContent = route.nextHop;
-        row.insertCell().textContent = route.metric;
+        const metricCell = row.insertCell();
+        metricCell.textContent = route.metric;
+        if (route.metric === MAX_METRIC) metricCell.classList.add('metric-invalid');
+        
         row.insertCell().textContent = route.interfaceName;
-        let timeoutDisplay = route.isDirectlyConnected ? 'N/A' : 
-                             route.markedForDeletion ? `FLUSH ${route.flushTimerCountdown}s` : `${route.invalidTimerCountdown}s`;
-        if (route.metric === MAX_METRIC && !route.isDirectlyConnected) timeoutDisplay += ` (INV)`;                         
+        let timeoutDisplay = route.isDirectlyConnected ? 'N/A' :
+            route.markedForDeletion ? `FLUSH ${route.flushTimerCountdown}s` : `${route.invalidTimerCountdown}s`;
+        if (route.metric === MAX_METRIC && !route.isDirectlyConnected && !route.markedForDeletion) timeoutDisplay += ` (INV)`;
         row.insertCell().textContent = timeoutDisplay;
     });
 }
 
 function logEvent(message) {
     const fullMessage = `[T=${simulationTime}s] ${message}`;
-    eventLog.unshift(fullMessage); // Add to beginning for chronological order in display
-    if (eventLog.length > 200) eventLog.pop(); // Keep log size manageable
-    // Don't update display here directly, updateEventLogDisplay will be called by simulationTick or controls
+    eventLog.unshift(fullMessage); 
+    if (eventLog.length > 200) eventLog.pop(); 
 }
 
 function updateEventLogDisplay() {
@@ -362,28 +413,68 @@ function readGlobalSettingsFromUI() {
     globalSettings.poisonReverse = el.poisonReverse.checked;
     globalSettings.triggeredUpdates = el.triggeredUpdates.checked;
 
-    // If split horizon is off, poison reverse should also be off (UI logic)
     if (!globalSettings.splitHorizon) {
         el.poisonReverse.checked = false;
         globalSettings.poisonReverse = false;
+        el.poisonReverse.disabled = true;
+    } else {
+        el.poisonReverse.disabled = false;
     }
 }
 
-// --- Event Handlers ---
-el.startButton.addEventListener('click', () => {
-    if (simulationIntervalId) return; // Already running
-    readGlobalSettingsFromUI();
-    if (simulationTime === 0) { // Fresh start or after reset
-        initializeSimulationState(); // Re-initialize if starting from 0 after a reset
+function showUpdateIndicator(routerId, isSending) {
+    const indicator = el.routerDisplays[routerId];
+    if (indicator) {
+        if (isSending) {
+            indicator.classList.add('sending');
+        } else {
+            indicator.classList.remove('sending');
+        }
     }
-    simulationIntervalId = setInterval(simulationTick, 1000); // Run tick every 1 real second
+}
+
+function updateLinkVisuals() {
+    el.linkToggleButtons.forEach(button => {
+        const linkId = button.dataset.linkid;
+        const link = globalLinks[linkId];
+        if (link) {
+            button.textContent = link.status === "up" ? "Activo" : "Inactivo";
+            button.classList.toggle('active', link.status === "up");
+            button.classList.toggle('inactive', link.status === "down");
+        }
+    });
+
+    // Update interface paragraph visuals
+    routers.forEach(router => {
+        router.interfaces.forEach(iface => {
+            const ifaceElement = document.querySelector(`.interfaces p[data-linkid="${iface.linkId}"][data-interface="${router.id}-${iface.name}"]`);
+            // Need to fix the data-interface attribute in HTML to be unique, e.g. "R1-eth0"
+            // For now, let's assume the HTML is updated.
+            const uniqueIfaceSelector = document.querySelector(`.interfaces p[data-interface="${router.id}-${iface.name}"]`);
+             if (uniqueIfaceSelector) {
+                if (globalLinks[iface.linkId]?.status === "down") {
+                    uniqueIfaceSelector.classList.add('link-down');
+                } else {
+                    uniqueIfaceSelector.classList.remove('link-down');
+                }
+            }
+        });
+    });
+}
+// --- Event Handlers ---
+el.startButton.addEventListener('click', () => { /* ... (igual que antes) ... */ 
+    if (simulationIntervalId) return;
+    readGlobalSettingsFromUI();
+    if (simulationTime === 0) { 
+        initializeSimulationState();
+    }
+    simulationIntervalId = setInterval(simulationTick, 1000); 
     el.startButton.disabled = true;
     el.pauseButton.disabled = false;
     el.stepButton.disabled = true;
     logEvent("Simulación iniciada.");
 });
-
-el.pauseButton.addEventListener('click', () => {
+el.pauseButton.addEventListener('click', () => { /* ... (igual que antes) ... */ 
     clearInterval(simulationIntervalId);
     simulationIntervalId = null;
     el.startButton.disabled = false;
@@ -391,30 +482,56 @@ el.pauseButton.addEventListener('click', () => {
     el.stepButton.disabled = false;
     logEvent("Simulación pausada.");
 });
-
-el.stepButton.addEventListener('click', () => {
-    if (simulationIntervalId) return; // Can't step if running continuously
+el.stepButton.addEventListener('click', () => { /* ... (igual que antes) ... */ 
+    if (simulationIntervalId) return; 
     readGlobalSettingsFromUI();
-    if (simulationTime === 0) { // Ensure initialization if stepping from the very beginning
+    if (simulationTime === 0) { 
         initializeSimulationState();
     }
     simulationTick();
     logEvent("Simulación avanzada un paso.");
 });
-
-el.resetButton.addEventListener('click', () => {
+el.resetButton.addEventListener('click', () => { /* ... (igual que antes) ... */ 
     clearInterval(simulationIntervalId);
     simulationIntervalId = null;
-    initializeSimulationState(); // This also resets simulationTime to 0 and clears logs
+    initializeSimulationState(); 
     el.startButton.disabled = false;
     el.pauseButton.disabled = true;
-    el.stepButton.disabled = false; // Can step from reset state
+    el.stepButton.disabled = false;
     logEvent("Simulación reiniciada.");
-    updateAllDisplays(); // Ensure UI reflects reset state immediately
+    updateAllDisplays(); 
 });
 
+el.splitHorizon.addEventListener('change', readGlobalSettingsFromUI); // Actualizar al cambiar
 
-// Initial call to set up the page
+el.linkToggleButtons.forEach(button => {
+    button.addEventListener('click', () => {
+        if (simulationIntervalId && simulationTime > 0) { // Only allow changes if paused or before start
+            logEvent("ERROR: Detenga la simulación para cambiar el estado del enlace.");
+            // alert("Por favor, pause o reinicie la simulación para cambiar el estado del enlace.");
+            // return;
+        }
+        const linkId = button.dataset.linkid;
+        const link = globalLinks[linkId];
+        if (link) {
+            link.status = (link.status === "up") ? "down" : "up";
+            logEvent(`Usuario cambió enlace ${linkId} a ${link.status}.`);
+            updateLinkVisuals();
+
+            // Notify routers about the link change
+            link.peers.forEach(peerInfo => {
+                const router = routers.find(r => r.id === peerInfo.routerId);
+                router?.handleLinkChange(linkId, link.status);
+            });
+            // If simulation is running, a triggered update might be good here,
+            // otherwise changes will propagate on next tick or manual step.
+            // For simplicity, relying on existing pendingTriggeredUpdate logic in routers.
+             updateAllDisplays(); // Update UI immediately after link change
+        }
+    });
+});
+
+// Initial call
+readGlobalSettingsFromUI();
 initializeSimulationState();
-readGlobalSettingsFromUI(); // Read initial values from HTML
-updateAllDisplays(); // Display initial state
+updateAllDisplays();
